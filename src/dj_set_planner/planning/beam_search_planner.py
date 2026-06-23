@@ -738,15 +738,14 @@ def plan_set(
     seeds = index_constraints(constraints)
     pool = build_candidate_pool(library, seeds)
 
-    # 1a) Drop tracks above the VENUE'S harshness ceiling on ABSOLUTE energy
-    #     (before normalization) — restaurant rejects genuinely loud tracks, club
-    #     allows all. MUST_PLAY is exempt; an emptied pool falls back to the full
-    #     pool.
-    pool = _drop_over_cap_tracks(pool, features, profile, seeds)
-
-    # 1b) Strict character filter: when on, keep only tracks that fit the venue's
-    #     character (same MUST_PLAY exemption + non-empty fallback).
+    # 1a/1b) Venue filtering is STRICT-ONLY. Soft mode (the default) keeps every
+    #     track and only RANKS by character via the position score — so a
+    #     restaurant set still uses your whole library, just melodic-first. Strict
+    #     additionally drops tracks above the venue's harshness ceiling AND tracks
+    #     that don't fit the venue character. DJ-chosen tracks are exempt; an
+    #     emptied pool falls back to the full pool.
     if strict:
+        pool = _drop_over_cap_tracks(pool, features, profile, seeds)
         pool = _apply_strict_filter(pool, features, profile, seeds)
 
     # Empty library / fully avoided pool -> an empty but valid plan.
