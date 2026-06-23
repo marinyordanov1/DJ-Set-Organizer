@@ -20,6 +20,7 @@ Each mapping formula is commented with what raw feature it uses and why.
 from __future__ import annotations
 
 from ..domain.models import Track, TrackFeatures
+from ..utils.camelot import to_camelot
 from ..utils.logging import get_logger
 from .feature_extractor import FeatureExtractor
 from .heuristic_scorer import _clamp01, score_from_metadata
@@ -41,6 +42,43 @@ _CENTROID_MAX_HZ = 6000.0
 # BPM normalization band (mirrors the heuristic scorer for consistency).
 _BPM_MIN = 80.0
 _BPM_MAX = 135.0
+
+# Krumhansl-Schmuckler key profiles (major / minor) for key estimation from
+# chroma. Pitch classes are C..B; the profile is rolled to each tonic.
+_KS_MAJOR = (6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88)
+_KS_MINOR = (6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17)
+_PITCHES = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
+
+
+def _estimate_key(y, sr) -> str | None:
+    """Estimate the musical key as ``"C"`` / ``"Am"`` from a signal (or None).
+
+    Correlates the mean chroma vector against the 24 rotated Krumhansl-Schmuckler
+    profiles and returns the best match. Approximate (~70-80% on clean material).
+    """
+
+    try:
+        import librosa
+        import numpy as np
+
+        chroma = librosa.feature.chroma_cqt(y=y, sr=sr).mean(axis=1)
+        if not np.any(chroma):
+            return None
+        best_corr = None
+        best = None
+        for i in range(12):
+            for profile, is_minor in ((_KS_MAJOR, False), (_KS_MINOR, True)):
+                rolled = np.roll(np.array(profile), i)
+                corr = float(np.corrcoef(chroma, rolled)[0, 1])
+                if best_corr is None or corr > best_corr:
+                    best_corr = corr
+                    best = (i, is_minor)
+        if best is None:
+            return None
+        idx, minor = best
+        return _PITCHES[idx] + ("m" if minor else "")
+    except Exception:  # never let key estimation break analysis
+        return None
 
 
 class LibrosaFeatureExtractor(FeatureExtractor):
@@ -117,6 +155,21 @@ class LibrosaFeatureExtractor(FeatureExtractor):
         else:
             tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
             bpm = float(np.atleast_1d(tempo)[0]) if tempo is not None else 0.0
+
+        # Persist estimated BPM/key back onto the track when tags + Rekordbox
+        # didn't supply them, so the UI and transition scoring have values to
+        # work with. Only fills MISSING fields — never overrides real data.
+        # (librosa estimates are approximate.)
+        if (not track.bpm or track.bpm <= 0) and bpm > 0:
+            est = bpm
+            while est >= 160.0:  # fold obvious double-time into a DJ range
+                est /= 2.0
+            track.bpm = round(est, 1)
+        if not track.camelot_key:
+            key = _estimate_key(y, sr)
+            if key:
+                track.musical_key = track.musical_key or key
+                track.camelot_key = to_camelot(key)
 
         # RMS energy: loudness/density proxy. Mean RMS over frames.
         rms = float(np.mean(librosa.feature.rms(y=y)))

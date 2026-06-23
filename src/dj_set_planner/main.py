@@ -2,7 +2,11 @@
 
 Run with ``python -m dj_set_planner.main`` (or the ``dj-set-planner`` console
 script). Creates the Flask app, prints the local URL, opens the default browser
-to it, and runs the server on ``127.0.0.1:5000``.
+to it, and runs the server on ``127.0.0.1:5001``.
+
+Port 5001 (not 5000): macOS reserves port 5000 for the AirPlay Receiver, which
+hijacks ``http://127.0.0.1:5000`` and answers with a 403 — so binding there
+either fails ("address already in use") or the browser hits AirPlay, not us.
 """
 
 from __future__ import annotations
@@ -16,7 +20,7 @@ from .utils.logging import get_logger
 _log = get_logger(__name__)
 
 HOST = "127.0.0.1"
-PORT = 5000
+PORT = 5001  # not 5000 — macOS AirPlay Receiver squats on 5000 and 403s
 
 
 def main() -> None:

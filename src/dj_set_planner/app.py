@@ -126,7 +126,17 @@ class PlannerService:
         for path in paths:
             track = read_metadata(path)  # never raises; best-effort fields
             saved.append(self.tracks.upsert(track))
-        _log.info("scan: discovered %d track(s) under %s", len(saved), folder)
+        # Sync the library to this folder: drop tracks no longer present, so
+        # switching folders REPLACES rather than accumulates. Re-scanning the
+        # same folder keeps existing tracks (and their analysis) by file_path.
+        removed = self.tracks.remove_not_in(set(paths))
+        if removed:
+            self._last_plan = None
+            self._last_plan_id = None
+        _log.info(
+            "scan: %d track(s) under %s (removed %d no longer present)",
+            len(saved), folder, removed,
+        )
         return saved
 
     # ----- analyze -------------------------------------------------------- #
@@ -205,6 +215,20 @@ class PlannerService:
             base = features.get(track_id) or TrackFeatures(track_id=track_id)
             features[track_id] = derive_energy_dependent(base, energy)
         return features
+
+    # ----- clear library -------------------------------------------------- #
+    def clear_library(self) -> int:
+        """Remove all loaded tracks (and derived data); return the count.
+
+        Resets the in-memory "current plan" too, so a stale set can't be
+        exported after the library it came from is gone.
+        """
+
+        n = self.tracks.clear_all()
+        self._last_plan = None
+        self._last_plan_id = None
+        _log.info("clear_library: removed %d track(s) and all derived data", n)
+        return n
 
     # ----- library snapshot ---------------------------------------------- #
     def library(self) -> dict[str, Any]:
@@ -296,7 +320,17 @@ class PlannerService:
         self._last_plan_id = plan_id
 
         tracks_by_id = {t.id: t for t in library if t.id is not None}
-        return _plan_to_json(plan, plan_id, tracks_by_id, features)
+        result = _plan_to_json(plan, plan_id, tracks_by_id, features)
+        # Warn when the set was built from unanalyzed tracks — those default to a
+        # flat 0.5 energy (and no BPM/key), which makes the curve and ordering
+        # meaningless. This is the #1 cause of "the curve looks wrong".
+        unanalyzed = sum(1 for t in library if t.id not in features)
+        if unanalyzed:
+            result["warning"] = (
+                f"{unanalyzed} of {len(library)} tracks aren't analyzed yet — "
+                "click Analyze and let it finish (~5s/track) for a meaningful set."
+            )
+        return result
 
     # ----- export --------------------------------------------------------- #
     def export(self, fmt: str, plan_id: int | None) -> str:
@@ -541,6 +575,10 @@ def create_app() -> Flask:
     @app.get("/api/tracks")
     def api_tracks():
         return jsonify(service.library())
+
+    @app.delete("/api/tracks")
+    def api_clear_tracks():
+        return jsonify({"ok": True, "removed": service.clear_library()})
 
     @app.post("/api/constraints")
     def api_set_constraint():

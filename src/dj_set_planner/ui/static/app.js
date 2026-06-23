@@ -538,6 +538,21 @@ async function doImport() {
   } finally { busy(false); }
 }
 
+async function doClear() {
+  if (!confirm("Remove ALL loaded tracks and their analysis from the library? This cannot be undone.")) return;
+  busy(true, "Clearing library…");
+  try {
+    const data = await api("/api/tracks", { method: "DELETE" });
+    state.tracks = []; state.features = {}; state.overrides = {};
+    state.constraints = {}; state.selected.clear(); state.lastPlan = null;
+    renderLibrary();
+    renderSet(null);
+    log(`Cleared ${data.removed} track(s). Set a new folder and Scan.`, "ok");
+  } catch (err) {
+    log(`Clear failed: ${err.message}`, "error");
+  } finally { busy(false); }
+}
+
 async function doGenerate() {
   if (!state.tracks.length) { log("Scan a folder before generating a set.", "error"); return; }
   busy(true, "Generating set…");
@@ -546,6 +561,7 @@ async function doGenerate() {
     const data = await api("/api/generate", { method: "POST", body: { profile } });
     renderSet(data.plan);
     log(`Generated a ${data.plan.tracks.length}-track set (score ${fmtPct(data.plan.total_score)}).`, "ok");
+    if (data.warning) log(data.warning, "error");
   } catch (err) {
     log(`Generate failed: ${err.message}`, "error");
   } finally { busy(false); }
@@ -567,6 +583,7 @@ function wire() {
   $("btn-scan").addEventListener("click", doScan);
   $("btn-analyze").addEventListener("click", doAnalyze);
   $("btn-import").addEventListener("click", doImport);
+  $("btn-clear").addEventListener("click", doClear);
   $("btn-generate").addEventListener("click", doGenerate);
   $("btn-export-m3u").addEventListener("click", () => doExport("m3u"));
   $("btn-export-csv").addEventListener("click", () => doExport("csv"));

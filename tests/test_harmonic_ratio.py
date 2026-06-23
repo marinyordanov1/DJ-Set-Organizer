@@ -84,3 +84,44 @@ def test_librosa_tone_is_more_melodic_than_noise(tmp_path) -> None:
     noise_f = ex.extract(Track(id=2, file_path=noise_path))
 
     assert tone_f.harmonic_ratio > noise_f.harmonic_ratio
+
+
+def test_librosa_fills_missing_bpm_and_key(tmp_path) -> None:
+    pytest.importorskip("librosa")
+    from dj_set_planner.analysis.librosa_extractor import LibrosaFeatureExtractor
+
+    ex = LibrosaFeatureExtractor()
+    if not ex.is_available():
+        pytest.skip("librosa not importable")
+
+    sr = 22050
+    n = sr * 5
+    # A C-major triad (C-E-G) so key estimation has something to lock onto.
+    def _tone(f):
+        return [math.sin(2 * math.pi * f * i / sr) for i in range(n)]
+    chord = [(a + b + c) / 3 for a, b, c in zip(_tone(261.63), _tone(329.63), _tone(392.0))]
+    path = str(tmp_path / "cmaj.wav")
+    _write_wav(path, chord, sr)
+
+    t = Track(id=1, file_path=path)  # no bpm, no key
+    ex.extract(t)
+    assert t.musical_key is not None        # key was estimated
+    assert t.camelot_key is not None        # and mapped to Camelot
+
+
+def test_librosa_does_not_override_existing_bpm_key(tmp_path) -> None:
+    pytest.importorskip("librosa")
+    from dj_set_planner.analysis.librosa_extractor import LibrosaFeatureExtractor
+
+    ex = LibrosaFeatureExtractor()
+    if not ex.is_available():
+        pytest.skip("librosa not importable")
+
+    sr = 22050
+    chord = [math.sin(2 * math.pi * 261.63 * i / sr) for i in range(sr * 5)]
+    path = str(tmp_path / "c.wav")
+    _write_wav(path, chord, sr)
+
+    t = Track(id=1, file_path=path, bpm=124.0, musical_key="Am", camelot_key="8A")
+    ex.extract(t)
+    assert t.bpm == 124.0 and t.camelot_key == "8A"  # real data preserved

@@ -7,19 +7,16 @@ and the music happen to produce: a library of loud club/tech-house tracks can
 sit entirely at 0.55..0.91, so NOTHING lands in the 0.30 intro band and the
 planner can't tell the DJ's lightest opener from their biggest peak.
 
-``relativize_features`` fixes this by rescaling each track's energy from where it
-sits **within the library's own range** onto the profile's target envelope. The
-library's lowest-energy tracks map to ``profile.min_energy`` (so they read as
-intro material), its highest map to ``profile.max_energy`` (so they read as
-peaks), and the *shape* of the story is preserved. This makes the planner adapt
-to any library — a quiet lounge set and a driving club set both get a proper
-intro -> build -> peak -> outro arc.
+``relativize_features`` rescales each track's energy from where it sits within
+the library's own range onto the profile's target envelope. The library's
+lowest-energy tracks map to ``profile.min_energy`` (intro material), the highest
+to ``profile.max_energy`` (peaks), and the story's shape is preserved. It anchors
+on the 5th/95th percentiles so one outlier doesn't squash everyone else.
+``harmonic_ratio`` is spread the same way so the venue character bands can tell a
+homogeneous library's tracks apart.
 
-Robustness: we anchor the rescale on the 5th/95th percentiles (not the raw
-min/max) so a single outlier track doesn't squash everyone else into a sliver of
-the band. Energy-dependent features are recomputed from the new energy via
-:func:`analysis.heuristic_scorer.derive_energy_dependent` so the whole feature
-vector stays internally consistent.
+NOTE: only ANALYZED tracks are rescaled. Tracks without features keep the neutral
+0.5 default — so an unanalyzed library produces a flat curve. Run "Analyze" first.
 """
 
 from __future__ import annotations
@@ -58,10 +55,8 @@ def relativize_features(
 ) -> dict[int, TrackFeatures]:
     """Return a features dict whose energies are rescaled to the profile band.
 
-    ``pool`` is the candidate tracks (already AVOID-filtered). Only their
-    features are rescaled; any features for tracks outside the pool are passed
-    through unchanged. If the library has too few tracks or no spread to
-    normalize against, the original ``features`` is returned untouched.
+    Only pooled tracks WITH features are rescaled; others pass through unchanged.
+    If the library has too few tracks or no spread, the original is returned.
     """
 
     energies = sorted(
@@ -70,13 +65,11 @@ def relativize_features(
         if t.id is not None and (f := features.get(t.id)) is not None
     )
     if len(energies) < 3:
-        # Not enough data to define a meaningful library range.
         return features
 
     lo = _percentile(energies, low_q)
     hi = _percentile(energies, high_q)
     if hi - lo < 1e-6:
-        # The library is essentially mono-energy; nothing to stretch.
         return features
 
     span = hi - lo
@@ -84,11 +77,6 @@ def relativize_features(
     if tgt_hi < tgt_lo:  # defensive: never invert the target band
         tgt_lo, tgt_hi = tgt_hi, tgt_lo
 
-    # Also spread harmonic_ratio (melodic <-> percussive) onto a standard 0.2..0.8
-    # band. A homogeneous library (e.g. all melodic tech-house) has a compressed
-    # raw harmonic_ratio (~0.50..0.79) so the venue character bands can't tell its
-    # tracks apart; stretching the library's own p5..p95 across 0.2..0.8 restores
-    # discrimination. For an already-diverse library this is near-identity.
     harmonics = sorted(
         f.harmonic_ratio
         for t in pool
@@ -105,9 +93,7 @@ def relativize_features(
         f = features.get(t.id)
         if f is None:
             continue
-        # Where does this track sit in the library (0 = lightest, 1 = biggest)?
         rel = _clamp01((f.energy_score - lo) / span)
-        # Map that relative position onto the profile's target energy envelope.
         new_energy = tgt_lo + rel * (tgt_hi - tgt_lo)
         new_f = derive_energy_dependent(f, new_energy)
         if h_span > 1e-6:
@@ -118,10 +104,6 @@ def relativize_features(
     _log.info(
         "Adaptive energy: library p5..p95 [%.2f..%.2f] -> profile band "
         "[%.2f..%.2f] across %d candidate track(s).",
-        lo,
-        hi,
-        tgt_lo,
-        tgt_hi,
-        len(pool),
+        lo, hi, tgt_lo, tgt_hi, len(pool),
     )
     return out

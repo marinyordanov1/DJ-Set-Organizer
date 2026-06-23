@@ -160,6 +160,38 @@ class TrackRepository:
         conn.execute("DELETE FROM tracks WHERE id = ?", (track_id,))
         conn.commit()
 
+    def clear_all(self) -> int:
+        """Delete every track; return how many were removed.
+
+        FK ``ON DELETE CASCADE`` (with PRAGMA foreign_keys=ON) takes care of the
+        derived rows: features, constraints, overrides, and set-plan tracks.
+        """
+
+        conn = self._db.conn
+        n = conn.execute("SELECT COUNT(*) FROM tracks").fetchone()[0]
+        conn.execute("DELETE FROM tracks")
+        conn.commit()
+        return int(n)
+
+    def remove_not_in(self, keep_paths) -> int:
+        """Delete tracks whose ``file_path`` isn't in ``keep_paths``; return count.
+
+        Used by Scan to sync the library to the scanned folder (so switching
+        folders doesn't accumulate stale tracks). Derived rows cascade.
+        """
+
+        keep = set(keep_paths)
+        conn = self._db.conn
+        stale = [
+            r["id"]
+            for r in conn.execute("SELECT id, file_path FROM tracks").fetchall()
+            if r["file_path"] not in keep
+        ]
+        for tid in stale:
+            conn.execute("DELETE FROM tracks WHERE id = ?", (tid,))
+        conn.commit()
+        return len(stale)
+
 
 # --------------------------------------------------------------------------- #
 # FeatureRepository
