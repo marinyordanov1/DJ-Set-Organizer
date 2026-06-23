@@ -99,26 +99,25 @@ def test_apply_fills_bpm_and_camelot_by_basename(tmp_path):
     assert track.duration_seconds == 312
 
 
-def test_apply_matches_full_path_and_does_not_clobber(tmp_path):
+def test_apply_overrides_wrong_bpm_key(tmp_path):
     xml_path = _write_xml(tmp_path, _SAMPLE_XML)
 
-    # Exact full-path match. Track already has its own bpm/key, which must be
-    # preserved (Rekordbox data only fills *missing* fields).
+    # Exact full-path match. The Track has a WRONG existing bpm/key (e.g. a
+    # half-time tag — 61.25 instead of the real 122.5). Rekordbox is
+    # AUTHORITATIVE and must overwrite them; duration is filled (was missing).
     track = Track(
         id=2,
         file_path="/Users/dj/Music/sub folder/Daylight.flac",
-        bpm=128.0,
+        bpm=61.25,
         musical_key="Em",
         camelot_key="9A",
     )
     matched = apply_rekordbox_to_tracks([track], xml_path)
 
     assert matched == 1
-    # Existing data untouched...
-    assert track.bpm == 128.0
-    assert track.musical_key == "Em"
-    assert track.camelot_key == "9A"
-    # ...but the previously-missing duration was filled in.
+    assert track.bpm == 122.5          # overridden, not the wrong half-time value
+    assert track.musical_key == "C"
+    assert track.camelot_key == "8B"
     assert track.duration_seconds == 305
 
 

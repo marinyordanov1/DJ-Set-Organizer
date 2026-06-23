@@ -161,8 +161,12 @@ class LibrosaFeatureExtractor(FeatureExtractor):
         # work with. Only fills MISSING fields — never overrides real data.
         # (librosa estimates are approximate.)
         if (not track.bpm or track.bpm <= 0) and bpm > 0:
+            # Fold half/double-time into a typical DJ range. ponytail: assumes
+            # 90-175 BPM (house/techno); a genuine 80 BPM track would fold to 160.
             est = bpm
-            while est >= 160.0:  # fold obvious double-time into a DJ range
+            while est < 90.0:
+                est *= 2.0
+            while est >= 175.0:
                 est /= 2.0
             track.bpm = round(est, 1)
         if not track.camelot_key:

@@ -216,10 +216,11 @@ def apply_rekordbox_to_tracks(tracks: list[Track], xml_path: str) -> int:
       2. Otherwise, match by file *basename* (filename only) — handles the
          common case where the library was moved to a different folder.
 
-    For each matched Track we fill ``bpm``, ``musical_key``, ``camelot_key``
-    and ``duration_seconds`` **only when the Track is currently missing them**
-    (we never clobber data the Track already has). ``camelot_key`` is also
-    derived from the Track's own key if Rekordbox lacked one.
+    Rekordbox is AUTHORITATIVE: for a matched Track its ``bpm``, ``musical_key``
+    and ``camelot_key`` are OVERWRITTEN with the Rekordbox values (the DJ trusts
+    Rekordbox, and a wrong tag — e.g. a half-time BPM — must not survive an
+    explicit import). ``duration_seconds`` is only filled when missing (the file's
+    own duration is already exact).
 
     Returns the number of Tracks that matched a Rekordbox row. Tolerates a
     missing/garbage XML by returning ``0``.
@@ -258,22 +259,20 @@ def apply_rekordbox_to_tracks(tracks: list[Track], xml_path: str) -> int:
 
         matched += 1
 
-        # Fill only when the Track is missing the field. ``bpm``/``duration``
-        # treat a falsy/zero value as missing too.
-        if not track.bpm and row["bpm"] is not None:
+        # OVERRIDE bpm/key with Rekordbox (authoritative) — a wrong existing tag
+        # (e.g. half-time 65 vs the real 130) must not block the correct value.
+        if row["bpm"] is not None:
             track.bpm = row["bpm"]
+        if row["musical_key"] is not None:
+            track.musical_key = row["musical_key"]
+        if row["camelot_key"] is not None:
+            track.camelot_key = row["camelot_key"]
+        elif row["musical_key"] is not None:
+            track.camelot_key = to_camelot(row["musical_key"])
+
+        # Duration: the file's own value is exact, so only fill when missing.
         if not track.duration_seconds and row["duration_seconds"] is not None:
             track.duration_seconds = row["duration_seconds"]
-        if not track.musical_key and row["musical_key"] is not None:
-            track.musical_key = row["musical_key"]
-
-        # Camelot: prefer Rekordbox's derived value, else derive from whatever
-        # musical_key the Track now has.
-        if not track.camelot_key:
-            if row["camelot_key"] is not None:
-                track.camelot_key = row["camelot_key"]
-            elif track.musical_key:
-                track.camelot_key = to_camelot(track.musical_key)
 
     _log.info(
         "Applied Rekordbox data to %d/%d track(s) from %r",

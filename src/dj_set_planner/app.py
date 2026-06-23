@@ -321,15 +321,29 @@ class PlannerService:
 
         tracks_by_id = {t.id: t for t in library if t.id is not None}
         result = _plan_to_json(plan, plan_id, tracks_by_id, features)
-        # Warn when the set was built from unanalyzed tracks — those default to a
-        # flat 0.5 energy (and no BPM/key), which makes the curve and ordering
-        # meaningless. This is the #1 cause of "the curve looks wrong".
+
+        warnings: list[str] = []
+        # 1) Unanalyzed tracks default to a flat 0.5 energy (and no BPM/key),
+        #    making the curve/ordering meaningless — the #1 "curve looks wrong".
         unanalyzed = sum(1 for t in library if t.id not in features)
         if unanalyzed:
-            result["warning"] = (
+            warnings.append(
                 f"{unanalyzed} of {len(library)} tracks aren't analyzed yet — "
-                "click Analyze and let it finish (~5s/track) for a meaningful set."
+                "click Analyze and let it finish (~5s/track)."
             )
+        # 2) Target far exceeds the library: the planner must use EVERY track, so
+        #    the curve can't follow the arc (leftover low-energy tracks cause dips).
+        target_s = profile.target_duration_minutes * 60
+        if plan.tracks and plan.total_duration_seconds < target_s - 300:
+            mins = plan.total_duration_seconds // 60
+            warnings.append(
+                f"Only ~{mins} min of music is available but the target is "
+                f"{profile.target_duration_minutes} min — the set uses every track, "
+                "so the energy curve can't follow the arc cleanly. Set the target "
+                f"near {mins} min (or less) for a tighter story."
+            )
+        if warnings:
+            result["warning"] = "  ".join(warnings)
         return result
 
     # ----- export --------------------------------------------------------- #
