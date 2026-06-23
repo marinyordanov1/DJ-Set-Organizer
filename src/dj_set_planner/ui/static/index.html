@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AI DJ Set Planner</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <!-- ============================ TOP BAR ============================ -->
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark">◈</span>
+      <span class="brand-name">DJ Set Planner</span>
+    </div>
+
+    <div class="topbar-folder">
+      <input id="folder-input" type="text" class="folder-input"
+             placeholder="/path/to/your/music/folder" spellcheck="false" />
+    </div>
+
+    <div class="topbar-actions">
+      <button id="btn-scan" class="btn">Scan</button>
+      <button id="btn-analyze" class="btn">Analyze</button>
+      <button id="btn-import" class="btn">Import Rekordbox XML</button>
+      <button id="btn-generate" class="btn btn-primary">Generate Set</button>
+      <button id="btn-export-m3u" class="btn">Export M3U</button>
+      <button id="btn-export-csv" class="btn">Export CSV</button>
+    </div>
+  </header>
+
+  <!-- ============================ MAIN GRID ============================ -->
+  <main class="layout">
+    <!-- ---------------------- LEFT: event context ---------------------- -->
+    <section class="panel panel-context" aria-label="Event context">
+      <h2 class="panel-title">Event Context</h2>
+      <form id="context-form" class="context-form">
+        <label class="field">
+          <span>Preset</span>
+          <select id="f-preset"></select>
+        </label>
+
+        <label class="field">
+          <span>Target duration (min)</span>
+          <input id="f-duration" type="number" min="10" max="600" step="5" value="120" />
+        </label>
+
+        <label class="field">
+          <span>Venue</span>
+          <select id="f-venue">
+            <option>RESTAURANT</option><option>BAR</option><option>BEACH</option>
+            <option>CLUB</option><option>AFTERPARTY</option>
+            <option>OUTDOOR_DAY_PARTY</option>
+          </select>
+          <em id="venue-hint" class="venue-hint"></em>
+        </label>
+
+        <label class="field">
+          <span>Time of day</span>
+          <select id="f-time">
+            <option>DAY</option><option>SUNSET</option>
+            <option>NIGHT</option><option>LATE_NIGHT</option>
+          </select>
+        </label>
+
+        <label class="field">
+          <span>Peak strategy</span>
+          <select id="f-peak">
+            <option>ONE_MAIN_PEAK</option><option>MULTIPLE_SMALL_PEAKS</option>
+            <option>PROGRESSIVE_BUILD</option><option>FLAT_LOUNGE</option>
+          </select>
+        </label>
+
+        <label class="field field-check">
+          <input id="f-strict" type="checkbox" />
+          <span>Strict character (only on-venue tracks)</span>
+        </label>
+
+        <label class="field field-slider">
+          <span>Energy min <em id="f-minenergy-val">0.30</em></span>
+          <input id="f-minenergy" type="range" min="0" max="1" step="0.01" value="0.30" />
+        </label>
+
+        <label class="field field-slider">
+          <span>Energy max <em id="f-maxenergy-val">0.78</em></span>
+          <input id="f-maxenergy" type="range" min="0" max="1" step="0.01" value="0.78" />
+        </label>
+      </form>
+    </section>
+
+    <!-- ---------------------- CENTER: track library --------------------- -->
+    <section class="panel panel-library" aria-label="Track library">
+      <div class="panel-head">
+        <h2 class="panel-title">Track Library <span id="lib-count" class="muted"></span></h2>
+      </div>
+      <div class="table-wrap">
+        <table class="data-table" id="library-table">
+          <thead>
+            <tr>
+              <th class="col-sel">Sel</th>
+              <th>Title</th><th>Artist</th><th class="col-num">Dur</th>
+              <th class="col-num">BPM</th><th class="col-key">Key</th>
+              <th class="col-num">Energy</th><th class="col-num">Dance</th>
+              <th>Role hint</th><th class="col-constraint">Constraint</th>
+            </tr>
+          </thead>
+          <tbody id="library-body">
+            <tr class="empty-row"><td colspan="10">No tracks yet — set a folder and click <strong>Scan</strong>.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ---------------------- RIGHT: generated set ---------------------- -->
+    <section class="panel panel-set" aria-label="Generated set plan">
+      <div class="panel-head">
+        <h2 class="panel-title">Set Plan</h2>
+        <span id="set-summary" class="muted"></span>
+      </div>
+      <div class="table-wrap">
+        <table class="data-table" id="set-table">
+          <thead>
+            <tr>
+              <th class="col-num">#</th><th>Title</th><th>Artist</th>
+              <th>Role</th><th class="col-num">Dur</th><th class="col-num">BPM</th>
+              <th class="col-key">Key</th><th class="col-num">Energy</th>
+              <th class="col-num">Trans</th>
+            </tr>
+          </thead>
+          <tbody id="set-body">
+            <tr class="empty-row"><td colspan="9">No set yet — click <strong>Generate Set</strong>. Hover a row for the reasoning.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <!-- ============================ BOTTOM ============================ -->
+  <footer class="bottombar">
+    <section class="curve-panel" aria-label="Energy curve">
+      <div class="panel-head">
+        <h2 class="panel-title">Energy Curve</h2>
+        <span class="legend">
+          <span class="legend-item"><span class="swatch swatch-band"></span>target band</span>
+          <span class="legend-item"><span class="swatch swatch-line"></span>actual energy</span>
+        </span>
+      </div>
+      <div id="curve-host" class="curve-host">
+        <p class="muted curve-empty">The energy story appears here after you generate a set.</p>
+      </div>
+    </section>
+
+    <section class="log-panel" aria-label="Status log">
+      <div class="panel-head">
+        <h2 class="panel-title">Status</h2>
+        <button id="btn-clear-log" class="btn btn-ghost btn-sm">Clear</button>
+      </div>
+      <ul id="status-log" class="status-log"></ul>
+    </section>
+  </footer>
+
+  <div id="busy" class="busy hidden"><div class="spinner"></div><span id="busy-text">Working…</span></div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

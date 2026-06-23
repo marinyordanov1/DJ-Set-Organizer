@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dj-set-planner"
+version = "0.1.0"
+description = "AI DJ Set Planner — a local desktop tool to pick and order tracks into a musical story."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "DJ Set Planner" }]
+
+# Core dependencies — MUST install cleanly on Python 3.14.
+dependencies = [
+    "mutagen",
+    "flask",
+    "flask-cors",
+]
+
+[project.optional-dependencies]
+# Heavy audio-analysis stack. OPTIONAL — the app runs fully without it,
+# falling back to tag data + deterministic heuristics. Never imported at
+# module top-level in a way that breaks import when absent.
+analysis = [
+    "librosa",
+    "numpy",
+    "scipy",
+    "scikit-learn",
+    "soundfile",
+]
+dev = [
+    "pytest",
+]
+
+[project.scripts]
+dj-set-planner = "dj_set_planner.main:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+dj_set_planner = ["db/schema.sql", "ui/**/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

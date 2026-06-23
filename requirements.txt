@@ -1,0 +1,13 @@
+# Core runtime dependencies (mirror of [project].dependencies).
+# MUST install cleanly on Python 3.14.
+mutagen
+flask
+flask-cors
+
+# Dev (mirror of [project.optional-dependencies].dev).
+pytest
+
+# NOTE: the heavy audio-analysis stack (librosa, numpy, scipy, scikit-learn,
+# soundfile) is OPTIONAL and intentionally NOT listed here. Install it only if
+# you want real audio analysis instead of the deterministic heuristic fallback:
+#     pip install -e ".[analysis]"
