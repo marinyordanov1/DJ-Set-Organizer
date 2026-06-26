@@ -499,7 +499,14 @@ def _plan_to_json(
                 "bpm": track.bpm if track else None,
                 "key": _track_display_key(track) if track else None,
                 "duration_seconds": track.duration_seconds if track else None,
-                "energy_score": round(float(feat.energy_score), 4) if feat else None,
+                # Show the SAME (library-relative) energy the curve plots and the
+                # planner used, so the table and the curve agree. Falls back to the
+                # raw feature energy if a point is somehow missing.
+                "energy_score": (
+                    round(float(plan.energy_points[spt.position]), 4)
+                    if 0 <= spt.position < len(plan.energy_points)
+                    else (round(float(feat.energy_score), 4) if feat else None)
+                ),
             }
         )
 
