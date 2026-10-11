@@ -55,6 +55,17 @@ class TrackFeatures:
     mixability_score: float = 0.5
     # 1.0 = fully melodic/harmonic, 0.0 = fully percussive/drum-driven.
     harmonic_ratio: float = 0.5
+    # Mix edges: percussive share of the first/last ~30 s (1.0 = drums only, an
+    # easy blend where key matters little). None = not measured yet.
+    intro_percussive: float | None = None
+    outro_percussive: float | None = None
+    # Sound-palette fingerprint (MFCC 1-12 + spectral contrast means). Compared
+    # pool-relative in planning. None = not analysed by this version yet;
+    # () = analysed, but nothing measurable (undecodable file).
+    timbre: tuple[float, ...] | None = None
+    # Pre-normalization energy, set only on the planner's working copy so
+    # transitions judge the audible jump, not the stretched one. Not stored.
+    raw_energy: float | None = None
 
 
 @dataclass

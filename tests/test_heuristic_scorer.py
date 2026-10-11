@@ -22,7 +22,7 @@ from dj_set_planner.domain.models import Track, TrackFeatures
 _FEATURE_FIELDS = [
     f.name
     for f in dataclasses.fields(TrackFeatures)
-    if f.name != "track_id"
+    if f.type == "float"  # the 0..1 scores; skips track_id + optional measured extras
 ]
 
 

@@ -83,7 +83,7 @@ _PEN_REPEAT_ARTIST = 0.10
 _PEN_KEY_CLASH = 0.10
 
 # A key_compatibility at/under this is treated as a "hard clash" for the penalty.
-_KEY_CLASH_THRESHOLD = 0.30
+_KEY_CLASH_THRESHOLD = 0.20  # real clashes only (see utils.camelot table)
 
 
 def _clamp01(x: float) -> float:
@@ -140,9 +140,12 @@ def _energy_curve_fit(f: TrackFeatures, segment: SetSegment) -> float:
     than a brittle in/out test.
     """
 
-    return _band_fit(
-        _clamp01(f.energy_score), segment.min_energy, segment.max_energy, tol=0.12
-    )
+    e = _clamp01(f.energy_score)
+    near = _band_fit(e, segment.min_energy, segment.max_energy, tol=0.12)
+    # Gentle long tail: further off is still worse, so the loudest track never
+    # ties a merely-warm one for the intro (both used to score a flat 0).
+    far = 0.3 * _band_fit(e, segment.min_energy, segment.max_energy, tol=0.45)
+    return max(near, far)
 
 
 def _mood_fit(f: TrackFeatures, profile: EventProfile) -> float:

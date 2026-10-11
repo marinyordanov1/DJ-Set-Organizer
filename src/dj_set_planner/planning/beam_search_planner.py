@@ -52,7 +52,7 @@ from ..domain.models import (
 from ..utils.logging import get_logger
 from . import context_profiles
 from .energy_curve import generate_energy_curve, segment_at
-from .energy_normalize import relativize_features
+from .energy_normalize import relativize_features, relativize_timbre
 from .explanations import explain_track
 from .track_roles import best_role
 from .venue_profiles import apply_time_modifier, character_fit, character_profile
@@ -297,8 +297,11 @@ def _seed_positions(
         existing = pinned.get(slot)
         if existing is None:
             pinned[slot] = track_id
-        elif track_id < existing:
-            # Deterministic tie-break: lower id keeps the slot.
+        elif track_id < existing and (
+            existing not in seeds.lock_positions or track_id in seeds.lock_positions
+        ):
+            # Deterministic tie-break: lower id keeps the slot — but a
+            # preference never evicts a LOCK_POSITION.
             pinned[slot] = track_id
 
     # LOCK_POSITION is the strongest: honour the DJ's exact slot first.
@@ -529,7 +532,7 @@ def _force_must_play(
     profile: EventProfile,
     slot_count: int,
 ) -> None:
-    """Ensure every MUST_PLAY track appears in the (best) completed beam.
+    """Ensure every MUST_PLAY / positional-seed track is in the completed beam.
 
     Called once on the chosen beam after the search. Any MUST_PLAY track not yet
     present is swapped in for the *weakest non-locked* placed slot whose segment
@@ -540,7 +543,13 @@ def _force_must_play(
     pool_by_id = {t.id: t for t in pool if t.id is not None}
     placed_ids = {p.track.id for p in beam.placements}
 
-    for track_id in sorted(seeds.must_play):
+    # MUST_PLAY first, then positional seeds that hold a pin at the final length
+    # (the beam can stop before reaching a pinned slot; _optimize_order then
+    # moves each to its slot). Seeds that lost their pin — a 2nd preferred
+    # intro, a peak with no MAIN_PEAK — stay optional, as before.
+    pinned = set(_seed_positions(seeds, pool_by_id, curve, slot_count).values())
+    protected = seeds.dj_chosen()  # never evict a track the DJ asked for
+    for track_id in sorted(seeds.must_play) + sorted(pinned - seeds.must_play):
         if track_id in placed_ids or track_id not in pool_by_id:
             continue
         track = pool_by_id[track_id]
@@ -552,7 +561,7 @@ def _force_must_play(
         best_idx = None
         best_gain = None
         for idx, placement in enumerate(beam.placements):
-            if placement.is_locked:
+            if placement.is_locked or placement.track.id in protected:
                 continue
             frac = _position_fraction(placement.position, slot_count)
             segment = segment_at(curve, frac)
@@ -641,9 +650,14 @@ def _finalize(
     # outro can end up one or two slots from the end. Re-anchor them here, after
     # the final length is known, so PREFERRED_INTRO always opens and
     # PREFERRED_OUTRO always closes.
-    if seeds.preferred_intro:
+    # Skip when that end already holds a preferred track (or a LOCK) — the
+    # optimizer anchored it there, and moving another one would undo its work.
+    def _anchored(p: _Placement, ids: set[int]) -> bool:
+        return p.track.id in ids or p.track.id in seeds.lock_positions
+
+    if seeds.preferred_intro and placements and not _anchored(placements[0], seeds.preferred_intro):
         _move_match(placements, seeds.preferred_intro, to_end=False)
-    if seeds.preferred_outro:
+    if seeds.preferred_outro and placements and not _anchored(placements[-1], seeds.preferred_outro):
         _move_match(placements, seeds.preferred_outro, to_end=True)
 
     set_tracks: list[SetPlanTrack] = []
@@ -766,13 +780,20 @@ def plan_set(
     #     track's energy to where it sits WITHIN this library, onto the profile's
     #     (time-adjusted) band, so the arc works for any library's loudness.
     #     Done on a copy; the DB's absolute energies are untouched.
+    #     The target is the CURVE's own span (its lowest intro band .. highest
+    #     peak band), not the raw profile envelope: otherwise the loudest tracks
+    #     land above every band, fit nowhere, and drift into the intro.
+    curve = generate_energy_curve(profile)  # 2) Target story shape.
     if adaptive_energy:
-        features = relativize_features(pool, features, profile)
+        span = replace(
+            profile,
+            min_energy=min(s.min_energy for s in curve),
+            max_energy=max(s.max_energy for s in curve),
+        )
+        features = relativize_features(pool, features, span)
+    features = relativize_timbre(pool, features)
 
     pool_by_id = {t.id: t for t in pool if t.id is not None}
-
-    # 2) Target story shape.
-    curve = generate_energy_curve(profile)
 
     # 3) The story is mapped across ``slot_estimate`` slots — the energy-curve
     #    fraction at each slot uses this, so positional seeds (preferred outro at
@@ -853,11 +874,148 @@ def plan_set(
     # arc (intro..outro) spans the real set rather than a padded estimate.
     final_slot_count = max(1, len(best_beam.placements))
 
-    # 7) Force in any missing MUST_PLAY tracks, then rescore + assemble.
+    # 7) Force in any missing MUST_PLAY tracks, re-order the chosen tracks for
+    #    the best flow (exact), then rescore + assemble.
     _force_must_play(
         best_beam, seeds, pool, features, curve, profile, final_slot_count
     )
+    _optimize_order(best_beam, curve, profile, seeds)
     return _finalize(best_beam, final_slot_count, curve, profile, seeds, features)
+
+
+# Exact re-ordering is Held-Karp, O(2^n * n^2): 16 tracks ~0.3 s in pure Python.
+# Bigger sets are improved with exact sliding windows of this size instead.
+_EXACT_MAX_TRACKS = 16
+_WINDOW = 12
+_NEG = float("-inf")
+
+
+def _held_karp(items, start, prev, nxt, step):
+    """Best order of ``items`` for slots ``start..`` between fixed neighbours.
+
+    ``step(slot, i, j)`` scores placing item ``j`` at ``slot`` after ``i``
+    (``i`` None = nothing before). ``nxt`` (or None) is the fixed item right
+    after the block, so its incoming step is part of the objective. Returns the
+    best ordering, or None when the pins make every ordering infeasible.
+    Deterministic: strict ``>`` keeps the first-found optimum.
+    """
+
+    n = len(items)
+    full = (1 << n) - 1
+    # tbl[k][a][b]: item b at slot start+k right after item a (plain lists so
+    # the hot loop below is pure indexing).
+    tbl = [None] + [
+        [[step(start + k, items[a], items[b]) for b in range(n)] for a in range(n)]
+        for k in range(1, n)
+    ]
+    # dp[mask][last] = (score, prev_last) over orderings of ``mask`` ending in last
+    dp: list[dict[int, tuple[float, int]]] = [{} for _ in range(full + 1)]
+    for a in range(n):
+        v = step(start, prev, items[a])
+        if v > _NEG:
+            dp[1 << a][a] = (v, -1)
+    for mask in range(1, full + 1):
+        if not mask & (mask - 1):
+            continue  # single-item orderings were seeded above
+        t = tbl[mask.bit_count() - 1]
+        row = dp[mask]
+        for b in range(n):
+            if not mask >> b & 1:
+                continue
+            best, arg = _NEG, -1
+            for a, (v, _) in dp[mask ^ (1 << b)].items():
+                s = v + t[a][b]
+                if s > best:
+                    best, arg = s, a
+            if arg >= 0:
+                row[b] = (best, arg)
+    best, last = _NEG, -1
+    for a, (v, _) in dp[full].items():
+        if nxt is not None:
+            v += step(start + n, items[a], nxt)
+        if v > best:
+            best, last = v, a
+    if last < 0:
+        return None
+    order, mask = [], full
+    while last >= 0:
+        order.append(items[last])
+        mask, last = mask ^ (1 << last), dp[mask][last][1]
+    return order[::-1]
+
+
+def _optimize_order(
+    beam: _Beam,
+    curve: list[SetSegment],
+    profile: EventProfile,
+    seeds: ConstraintSeeds,
+) -> None:
+    """Re-order the chosen tracks to maximise the set's total score.
+
+    The beam decides WHICH tracks play; its left-to-right greed rarely finds the
+    best ORDER (on real 15-track sets it never did). The objective is exactly
+    what ``_finalize`` reports — sum of position + incoming transition scores
+    for the final length — so this can only improve the plan. Positional pins
+    (lock / preferred intro / outro / peak) are hard constraints. Mutates
+    ``beam.placements`` in place.
+    """
+
+    pl = sorted(beam.placements, key=lambda p: p.position)
+    n = len(pl)
+    if n < 3:
+        return
+
+    segs = [segment_at(curve, _position_fraction(k, n)) for k in range(n)]
+    seg_idx = [next(i for i, s in enumerate(curve) if s is seg) for seg in segs]
+    pins = _seed_positions(seeds, {p.track.id: p.track for p in pl}, curve, n)
+    pinned_ids = set(pins.values())
+    cons = [seeds.by_track.get(p.track.id, []) for p in pl]
+    memo: dict[tuple, float] = {}
+
+    def step(slot: int, i: int | None, j: int) -> float:
+        tid = pl[j].track.id
+        if slot in pins and pins[slot] != tid or slot not in pins and tid in pinned_ids:
+            return _NEG
+        key = (seg_idx[slot], i, j)
+        v = memo.get(key)
+        if v is None:
+            prev = None if i is None else (pl[i].track, pl[i].features)
+            score, bd = compute_position_score(
+                pl[j].track, pl[j].features, segs[slot], profile, prev, cons[j]
+            )
+            t = bd.get("transition")
+            v = memo[key] = score + (t.score if t is not None else 0.0)
+        return v
+
+    def total(order: list[int]) -> float:
+        return sum(step(k, order[k - 1] if k else None, j) for k, j in enumerate(order))
+
+    order = list(range(n))
+    if n <= _EXACT_MAX_TRACKS:
+        order = _held_karp(order, 0, None, None, step) or order
+    else:
+        # Start pin-feasible (pinned tracks at their final-length slots, the
+        # rest in beam order) so every window can only improve it.
+        at = {k: j for k in pins for j in range(n) if pl[j].track.id == pins[k]}
+        rest = iter(j for j in range(n) if j not in at.values())
+        order = [at[k] if k in at else next(rest) for k in range(n)]
+        # ponytail: windowed exact passes, not a global optimum for long sets
+        # (~2% short on 37 tracks); add or-opt moves / restarts if that matters.
+        for _ in range(4):
+            before = total(order)
+            for a in range(0, n - 1, _WINDOW // 2):
+                b = min(n, a + _WINDOW)
+                best = _held_karp(
+                    order[a:b], a, order[a - 1] if a else None,
+                    order[b] if b < n else None, step,
+                )
+                if best:
+                    order[a:b] = best
+            if total(order) <= before + 1e-9:
+                break
+
+    if total(order) > total(list(range(n))) + 1e-9:
+        beam.placements = [replace(pl[j], position=k) for k, j in enumerate(order)]
 
 
 def _select_best_snapshot(

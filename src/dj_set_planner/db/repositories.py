@@ -7,6 +7,7 @@ parameterized.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 
 from ..domain.models import (
@@ -56,6 +57,9 @@ def _row_to_features(row: sqlite3.Row) -> TrackFeatures:
         restaurant_safety_score=row["restaurant_safety_score"],
         mixability_score=row["mixability_score"],
         harmonic_ratio=row["harmonic_ratio"],
+        intro_percussive=row["intro_percussive"],
+        outro_percussive=row["outro_percussive"],
+        timbre=tuple(json.loads(row["timbre"])) if row["timbre"] else None,
     )
 
 
@@ -210,8 +214,9 @@ class FeatureRepository:
                 (track_id, energy_score, danceability_score, mood_brightness,
                  groove_score, vocal_density, intro_suitability,
                  outro_suitability, peak_potential, restaurant_safety_score,
-                 mixability_score, harmonic_ratio)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 mixability_score, harmonic_ratio, intro_percussive,
+                 outro_percussive, timbre)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(track_id) DO UPDATE SET
                 energy_score            = excluded.energy_score,
                 danceability_score      = excluded.danceability_score,
@@ -223,7 +228,10 @@ class FeatureRepository:
                 peak_potential          = excluded.peak_potential,
                 restaurant_safety_score = excluded.restaurant_safety_score,
                 mixability_score        = excluded.mixability_score,
-                harmonic_ratio          = excluded.harmonic_ratio
+                harmonic_ratio          = excluded.harmonic_ratio,
+                intro_percussive        = excluded.intro_percussive,
+                outro_percussive        = excluded.outro_percussive,
+                timbre                  = excluded.timbre
             """,
             (
                 features.track_id,
@@ -238,6 +246,9 @@ class FeatureRepository:
                 features.restaurant_safety_score,
                 features.mixability_score,
                 features.harmonic_ratio,
+                features.intro_percussive,
+                features.outro_percussive,
+                json.dumps(list(features.timbre)) if features.timbre is not None else None,
             ),
         )
         conn.commit()

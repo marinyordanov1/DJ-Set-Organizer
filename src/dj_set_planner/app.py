@@ -33,6 +33,7 @@ from flask_cors import CORS
 
 from .analysis import get_extractor
 from .analysis.heuristic_scorer import derive_energy_dependent
+from .analysis.librosa_extractor import LibrosaFeatureExtractor
 from .analysis.metadata_reader import read_metadata
 from .analysis.rekordbox_import import apply_rekordbox_to_tracks
 from .analysis.scanner import scan_folder
@@ -164,6 +165,10 @@ class PlannerService:
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         result: dict[int, TrackFeatures] = {}
         for track in wanted:
+            if not os.path.isfile(track.file_path):
+                # Unmounted drive / moved file: keep what we measured before
+                # rather than overwriting it with tag-based guesses.
+                continue
             features = extractor.extract(track)  # extractor falls back internally
             # Ensure the features point at the persisted track id.
             features.track_id = track.id  # type: ignore[assignment]
@@ -326,10 +331,21 @@ class PlannerService:
         # 1) Unanalyzed tracks default to a flat 0.5 energy (and no BPM/key),
         #    making the curve/ordering meaningless — the #1 "curve looks wrong".
         unanalyzed = sum(1 for t in library if t.id not in features)
+        # Analyzed before mix-edge/timbre analysis existed: still plannable, but
+        # transitions fall back to rougher proxies until re-analyzed.
+        stale = sum(
+            1 for t in library
+            if (f := features.get(t.id)) is not None and f.timbre is None
+        )
+        if stale and LibrosaFeatureExtractor().is_available():
+            warnings.append(
+                f"{stale} track(s) were analyzed by an older version — click "
+                "Analyze again so transitions use the new mix-edge + sound analysis."
+            )
         if unanalyzed:
             warnings.append(
                 f"{unanalyzed} of {len(library)} tracks aren't analyzed yet — "
-                "click Analyze and let it finish (~5s/track)."
+                "click Analyze and let it finish (~3s/track)."
             )
         # 2) Target far exceeds the library: the planner must use EVERY track, so
         #    the curve can't follow the arc (leftover low-energy tracks cause dips).
@@ -341,6 +357,20 @@ class PlannerService:
                 f"{profile.target_duration_minutes} min — the set uses every track, "
                 "so the energy curve can't follow the arc cleanly. Set the target "
                 f"near {mins} min (or less) for a tighter story."
+            )
+        # 3) Ultra-long files (>20 min) are almost certainly full mixes, not
+        #    tracks — one of them eats a huge slice of the set. Suggest Avoid.
+        long_ones = [
+            t.title or t.file_path
+            for t in library
+            if (t.duration_seconds or 0) > 1200
+        ]
+        if long_ones:
+            warnings.append(
+                f"{len(long_ones)} file(s) are longer than 20 min (probably full "
+                f"mixes, not tracks): {', '.join(long_ones[:3])}"
+                f"{'…' if len(long_ones) > 3 else ''} — mark them Avoid unless "
+                "you really want them in the set."
             )
         if warnings:
             result["warning"] = "  ".join(warnings)

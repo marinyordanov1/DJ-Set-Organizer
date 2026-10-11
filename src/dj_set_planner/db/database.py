@@ -56,6 +56,9 @@ class Database:
         self._add_column_if_missing(
             "track_features", "harmonic_ratio", "REAL NOT NULL DEFAULT 0.5"
         )
+        self._add_column_if_missing("track_features", "intro_percussive", "REAL")
+        self._add_column_if_missing("track_features", "outro_percussive", "REAL")
+        self._add_column_if_missing("track_features", "timbre", "TEXT")
 
     def _add_column_if_missing(self, table: str, column: str, decl: str) -> None:
         cols = {

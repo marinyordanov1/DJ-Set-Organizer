@@ -21,6 +21,7 @@ NOTE: only ANALYZED tracks are rescaled. Tracks without features keep the neutra
 
 from __future__ import annotations
 
+import statistics
 from dataclasses import replace
 
 from ..analysis.heuristic_scorer import _clamp01, derive_energy_dependent
@@ -95,7 +96,7 @@ def relativize_features(
             continue
         rel = _clamp01((f.energy_score - lo) / span)
         new_energy = tgt_lo + rel * (tgt_hi - tgt_lo)
-        new_f = derive_energy_dependent(f, new_energy)
+        new_f = replace(derive_energy_dependent(f, new_energy), raw_energy=f.energy_score)
         if h_span > 1e-6:
             rel_h = _clamp01((f.harmonic_ratio - h_lo) / h_span)
             new_f = replace(new_f, harmonic_ratio=0.2 + rel_h * 0.6)
@@ -106,4 +107,35 @@ def relativize_features(
         "[%.2f..%.2f] across %d candidate track(s).",
         lo, hi, tgt_lo, tgt_hi, len(pool),
     )
+    return out
+
+
+def relativize_timbre(
+    pool: list[Track], features: dict[int, TrackFeatures]
+) -> dict[int, TrackFeatures]:
+    """Z-score each timbre dimension across the pool (on a copy).
+
+    Raw MFCC means of any two mastered dance tracks look ~0.99 alike by cosine;
+    centring on THIS pool makes the similarity tell its tracks apart. Tracks
+    without a timbre vector pass through unchanged.
+    """
+
+    ids = [
+        t.id for t in pool
+        if t.id is not None and (f := features.get(t.id)) is not None and f.timbre
+    ]
+    vecs = [features[i].timbre for i in ids]
+    if len(vecs) < 3 or len({len(v) for v in vecs}) != 1:
+        # Can't centre them: drop raw vectors (their cosines are all ~0.9 and
+        # would outscore the neutral value) so every pair scores neutral.
+        return {**features, **{i: replace(features[i], timbre=None) for i in ids}}
+    cols = list(zip(*vecs))
+    means = [statistics.fmean(c) for c in cols]
+    stds = [statistics.pstdev(c) or 1.0 for c in cols]
+    out = dict(features)
+    for i, v in zip(ids, vecs):
+        out[i] = replace(
+            features[i],
+            timbre=tuple((x - m) / sd for x, m, sd in zip(v, means, stds)),
+        )
     return out

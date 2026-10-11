@@ -29,6 +29,9 @@ CREATE TABLE IF NOT EXISTS track_features (
     restaurant_safety_score REAL NOT NULL DEFAULT 0.5,
     mixability_score        REAL NOT NULL DEFAULT 0.5,
     harmonic_ratio          REAL NOT NULL DEFAULT 0.5,
+    intro_percussive        REAL,
+    outro_percussive        REAL,
+    timbre                  TEXT,   -- JSON list of floats
     FOREIGN KEY (track_id) REFERENCES tracks (id) ON DELETE CASCADE
 );
 

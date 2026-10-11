@@ -15,8 +15,8 @@ Design notes
   increases are rewarded, big jumps/drops are penalised unless the set is
   *deliberately* entering a peak (big jump OK) or a breathing/outro section
   (big drop OK).
-* BPM compatibility understands **half-/double-time** mixing: 70 BPM into 140
-  BPM is treated as a perfect tempo match because they share a pulse.
+* BPM compatibility is scored in **percent** stretch and understands
+  **half-/double-time**: 70 BPM into 140 BPM shares a pulse.
 * Harmonic compatibility is delegated to
   :func:`utils.camelot.key_compatibility` (the single source of truth for key
   scoring).
@@ -26,6 +26,7 @@ Design notes
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 from ..domain.models import EventProfile, Track, TrackFeatures
@@ -42,27 +43,26 @@ _log = get_logger(__name__)
 _W_BPM = 0.25          # tempo continuity is the backbone of a smooth blend
 _W_KEY = 0.25          # harmonic continuity is equally important
 _W_ENERGY = 0.20       # energy-delta shaping (context-aware)
-_W_MOOD = 0.15         # mood/groove continuity (brightness + groove)
-_W_INTRO_OUTRO = 0.10  # does prev end well and nxt begin well?
+_W_MOOD = 0.20         # sound-palette continuity (timbre; DJs order by it most)
+_W_INTRO_OUTRO = 0.10  # are the overlapping edges easy to blend (drum-led)?
+
+# Neutral values for UNMEASURED tracks, set near the median of measured pairs so
+# a track that was never (re-)analyzed is neither favoured nor punished.
+_MOOD_NEUTRAL = 0.5     # median z-scored timbre similarity ~0.48
+_EDGES_NEUTRAL = 0.90   # median edge percussive share on real house/techno
 _W_VOCAL = 0.05        # penalty: two vocal-heavy tracks clashing
+
+# One bad factor ruins a blend no matter how good the rest is: the weaker of
+# tempo/key below this floor costs extra (a soft minimum).
+_CLASH_FLOOR = 0.45
+_CLASH_WEIGHT = 0.30
 
 # --------------------------------------------------------------------------- #
 # BPM tuning.
 # --------------------------------------------------------------------------- #
-# Half-/double-time detection tolerance: if nxt's bpm is within this fraction of
-# 2x or 0.5x of prev's bpm, we fold it back to the same pulse before scoring
-# (e.g. 70 vs 140 -> treated as 140 vs 140). 6% covers normal tempo spread.
-_HALF_DOUBLE_TOLERANCE = 0.06
-
-# BPM-difference bands (absolute difference after half/double folding), mapped
-# to a 0..1 sub-score. Bands per CONTRACTS:
-#   0-3 BPM   excellent  -> ~1.0
-#   3-6 BPM   good       -> ~0.85..0.7
-#   6-10 BPM  acceptable -> ~0.7..0.4
-#   10+ BPM   penalty    -> decays toward 0
-_BPM_EXCELLENT = 3.0
-_BPM_GOOD = 6.0
-_BPM_ACCEPTABLE = 10.0
+# Tempo stretch is scored in PERCENT (what the pitch fader / key lock feels):
+# 1 / (1 + (pct/6)^4) -> 2% 0.99, 3% 0.94, 4% 0.83, 5% 0.68, 6% 0.50, 8% 0.24.
+_BPM_HALF_PCT = 6.0
 
 
 @dataclass
@@ -98,44 +98,27 @@ def _bpm_compatibility(prev_bpm: float | None, nxt_bpm: float | None) -> tuple[f
         return 0.6, "tempo unknown"
 
     # Fold half-/double-time onto the same pulse so a 70->140 move reads as a
-    # perfect tempo match. We pick whichever of {nxt, nxt*2, nxt/2} lands
-    # closest to prev, but only accept the doubled/halved variant if it is
-    # within tolerance of an exact 2x relationship (so we don't accidentally
-    # "fix" an unrelated tempo).
-    candidates: list[tuple[float, str]] = [(nxt_bpm, "")]
+    # perfect tempo match (usually it's a half-time BPM read). No cut-off: an
+    # unrelated tempo lands on the curve's floor anyway. Ratio-based, so the
+    # score is the same in both directions.
+    def gap(a: float, b: float) -> float:
+        return max(a, b) / min(a, b) - 1.0
 
-    doubled = nxt_bpm * 2.0
-    if abs(doubled - prev_bpm) <= prev_bpm * _HALF_DOUBLE_TOLERANCE * 2:
-        candidates.append((doubled, "double-time"))
-    halved = nxt_bpm / 2.0
-    if abs(halved - prev_bpm) <= prev_bpm * _HALF_DOUBLE_TOLERANCE:
-        candidates.append((halved, "half-time"))
+    rel, fold_note = gap(prev_bpm, nxt_bpm), ""
+    for factor, label in ((2.0, "double-time"), (0.5, "half-time")):
+        r = gap(prev_bpm, nxt_bpm * factor)
+        if r < rel:
+            rel, fold_note = r, label
 
-    # Choose the interpretation with the smallest absolute BPM gap to prev.
-    folded_bpm, fold_note = min(candidates, key=lambda c: abs(c[0] - prev_bpm))
-    diff = abs(folded_bpm - prev_bpm)
-
-    # Piecewise-linear mapping of the (folded) BPM difference to 0..1.
-    if diff <= _BPM_EXCELLENT:
-        # 0 BPM -> 1.0, 3 BPM -> 0.9 (still "excellent").
-        score = 1.0 - (diff / _BPM_EXCELLENT) * 0.10
-        band = "excellent"
-    elif diff <= _BPM_GOOD:
-        # 3 BPM -> 0.9, 6 BPM -> 0.7.
-        score = 0.9 - ((diff - _BPM_EXCELLENT) / (_BPM_GOOD - _BPM_EXCELLENT)) * 0.20
-        band = "good"
-    elif diff <= _BPM_ACCEPTABLE:
-        # 6 BPM -> 0.7, 10 BPM -> 0.40.
-        score = 0.7 - ((diff - _BPM_GOOD) / (_BPM_ACCEPTABLE - _BPM_GOOD)) * 0.30
-        band = "acceptable"
-    else:
-        # 10 BPM -> 0.40, decaying ~0.02 per extra BPM, floored at 0.05.
-        score = max(0.05, 0.40 - (diff - _BPM_ACCEPTABLE) * 0.02)
-        band = "wide tempo gap"
-
-    note = f"{band} ({diff:.1f} BPM"
+    pct = rel * 100.0
+    score = max(0.05, 1.0 / (1.0 + (pct / _BPM_HALF_PCT) ** 4))
+    band = (
+        "excellent" if pct <= 2 else "good" if pct <= 4
+        else "stretch" if pct <= 6 else "wide tempo gap"
+    )
+    note = f"{band} ({pct:.1f}%"
     note += f", {fold_note})" if fold_note else ")"
-    return max(0.0, min(1.0, score)), note
+    return score, note
 
 
 # Energy-delta thresholds (difference in 0..1 energy_score between nxt and
@@ -160,86 +143,120 @@ def _energy_delta_score(
       * mild drops/rises in between scale smoothly
     """
 
-    delta = nxt_f.energy_score - prev_f.energy_score
+    # Judge the AUDIBLE jump: the planner stretches energies across the profile
+    # band for the arc, which would make a homogeneous download look jumpy.
+    def _e(f: TrackFeatures) -> float:
+        return f.raw_energy if f.raw_energy is not None else f.energy_score
+
+    actual = _e(nxt_f) - _e(prev_f)
+    word = "rise" if actual >= 0 else "fall"
     role = (entering_segment_role or "").upper()
 
     is_peak_entry = role in ("MAIN_PEAK", "SMALL_PEAK")
+    # Building out of the intro is as intended as dropping into the outro —
+    # otherwise the quiet tracks all get spent on the ending.
+    is_build_entry = role in ("WARM_GROOVE", "PROGRESSIVE_BUILD")
     is_cooldown_entry = role in ("BREATHING_SPACE", "RELEASE", "OUTRO")
 
-    # --- gentle rise: the ideal day-party move ---------------------------- #
+    # ``delta`` is measured WITH the intended flow: up into a build/peak, down
+    # into a cool-down (so a gentle fall is the ideal move while winding down).
+    delta = -actual if is_cooldown_entry else actual
+    # A BIG move is only intended into a peak / cool-down; a build welcomes a
+    # moderate lift but a +0.25 jump out of the intro is still abrupt.
+    intended_big = is_peak_entry or is_cooldown_entry
+    # Score at exactly +0.20 with the flow; the bands meet here continuously.
+    edge = 0.85 if intended_big else 0.70 if is_build_entry else 0.55
+
+    # --- gentle step with the flow: the ideal move (+0.00 0.95 -> +0.10 1.00)
     if 0.0 <= delta <= _SMALL_RISE_IDEAL:
-        # +0.00 -> 0.95, +0.10 -> 1.00 (a slight lift is *better* than flat).
-        return 0.95 + (delta / _SMALL_RISE_IDEAL) * 0.05, "gentle energy rise"
+        return 0.95 + (delta / _SMALL_RISE_IDEAL) * 0.05, f"gentle energy {word}"
 
-    # --- mild fall: acceptable, gently penalised -------------------------- #
+    # --- slight step against the flow (-0.10 0.80 -> 0.00 0.95)
     if -_SMALL_RISE_IDEAL <= delta < 0.0:
-        # -0.10 -> 0.80, -0.00 -> 0.95.
-        return 0.95 + (delta / _SMALL_RISE_IDEAL) * 0.15, "slight energy dip"
+        return 0.95 + (delta / _SMALL_RISE_IDEAL) * 0.15, f"slight energy {word}"
 
-    # --- moderate rise (0.10..0.20): still good but not ideal ------------- #
+    # --- moderate step with the flow (+0.10 1.00 -> +0.20 ``edge``)
     if _SMALL_RISE_IDEAL < delta < _BIG_DELTA:
-        # +0.10 -> 0.85, +0.20 -> 0.55.
         frac = (delta - _SMALL_RISE_IDEAL) / (_BIG_DELTA - _SMALL_RISE_IDEAL)
-        return 0.85 - frac * 0.30, "noticeable energy rise"
+        return 1.0 - frac * (1.0 - edge), f"noticeable energy {word}"
 
-    # --- moderate fall (-0.20..-0.10) ------------------------------------- #
+    # --- moderate step against the flow (-0.10 0.80 -> -0.20 0.45)
     if -_BIG_DELTA < delta <= -_SMALL_RISE_IDEAL:
-        if is_cooldown_entry:
-            # Wanted here (we're cooling the room) -> reward.
-            return 0.90, "intentional cool-down"
         frac = (-delta - _SMALL_RISE_IDEAL) / (_BIG_DELTA - _SMALL_RISE_IDEAL)
-        return 0.80 - frac * 0.35, "energy dip"
+        return 0.80 - frac * 0.35, f"energy {word} against the flow"
 
-    # --- BIG jump up (>= +0.20) ------------------------------------------- #
+    # --- BIG step with the flow (>= 0.20)
     if delta >= _BIG_DELTA:
-        if is_peak_entry:
-            # Big lift INTO a peak is exactly what we want -> strong score,
-            # but cap below a perfect blend since it's still abrupt.
-            return 0.85, "big lift into peak"
-        # Otherwise jarring for a day party; decay with how big the jump is.
-        # +0.20 -> 0.40, +0.50 -> ~0.10.
-        score = max(0.10, 0.40 - (delta - _BIG_DELTA) * 1.0)
-        return score, "abrupt energy jump"
+        if intended_big:
+            # Welcome up to ~0.30; beyond that even a planned lift/drop is abrupt.
+            score = max(0.30, 0.85 - max(0.0, delta - 0.30) * 2.0)
+            return score, ("big lift into peak" if is_peak_entry else "deliberate energy release")
+        return max(0.10, edge - (delta - _BIG_DELTA) * 1.5), "abrupt energy jump"
 
-    # --- BIG drop (<= -0.20) ---------------------------------------------- #
-    # (delta <= -0.20)
-    if is_cooldown_entry:
-        return 0.85, "deliberate energy release"
-    # Otherwise it kills momentum unexpectedly.
-    score = max(0.10, 0.40 - (-delta - _BIG_DELTA) * 1.0)
-    return score, "energy crash"
+    # --- BIG step against the flow (<= -0.20): kills momentum
+    return max(0.10, 0.45 - (-delta - _BIG_DELTA) * 1.5), (
+        "energy crash" if actual < 0 else "abrupt energy jump"
+    )
 
 
 def _mood_continuity(prev_f: TrackFeatures, nxt_f: TrackFeatures) -> tuple[float, str]:
-    """Score mood/groove continuity in 0..1.
+    """Score sound-palette continuity in 0..1.
 
-    Smooth transitions keep a similar *brightness* and *groove* feel. We
-    measure the average absolute difference of ``mood_brightness`` and
-    ``groove_score`` and map "more similar -> higher score". A full 1.0
-    difference would be a total mood whiplash.
+    The cosine similarity of the two timbre vectors (the planner z-scores them
+    across the pool) mapped to 0..1 — "do these two sound like they belong
+    together". Unmeasured on either side -> neutral, on the same scale, so a
+    stale/failed track is never favoured over a measured one.
     """
 
-    bright_diff = abs(nxt_f.mood_brightness - prev_f.mood_brightness)
-    groove_diff = abs(nxt_f.groove_score - prev_f.groove_score)
-    # Average the two feels; 0 diff -> identical mood, 1 diff -> opposite.
-    avg_diff = (bright_diff + groove_diff) / 2.0
-    # Linear: identical mood -> 1.0, fully opposite -> 0.0.
-    score = 1.0 - avg_diff
-    note = "consistent mood" if avg_diff <= 0.15 else "mood shift"
-    return max(0.0, min(1.0, score)), note
+    a, b = prev_f.timbre, nxt_f.timbre
+    if a and b and len(a) == len(b):
+        na = math.sqrt(sum(x * x for x in a))
+        nb = math.sqrt(sum(x * x for x in b))
+        if na > 0 and nb > 0:
+            cos = sum(x * y for x, y in zip(a, b)) / (na * nb)
+            score = (cos + 1.0) / 2.0
+            return score, "similar sound" if score >= 0.6 else "different sound"
+
+    return _MOOD_NEUTRAL, ""
 
 
 def _intro_outro_fit(prev_f: TrackFeatures, nxt_f: TrackFeatures) -> tuple[float, str]:
-    """Score how well prev *ends* and nxt *begins* in 0..1.
+    """Score how blendable the overlapping edges are in 0..1.
 
-    A clean blend wants the outgoing track to have a usable outro
-    (``outro_suitability`` high) AND the incoming track to have a usable intro
-    (``intro_suitability`` high). We average the two suitabilities.
+    The DJ overlaps prev's last ~30 s with nxt's first ~30 s; drum-led edges
+    blend cleanly. Uses the measured percussive share of those edges. Not
+    measured -> neutral (``intro/outro_suitability`` mean "good set
+    opener/closer", i.e. low energy, so they must not be used here).
     """
 
-    fit = (prev_f.outro_suitability + nxt_f.intro_suitability) / 2.0
-    note = "clean outro->intro" if fit >= 0.6 else "weak edges"
-    return max(0.0, min(1.0, fit)), note
+    po, ni = prev_f.outro_percussive, nxt_f.intro_percussive
+    if po is None or ni is None:
+        return _EDGES_NEUTRAL, ""
+    fit = (po + ni) / 2.0
+    return max(0.0, min(1.0, fit)), "drum-led edges" if fit >= 0.95 else ""
+
+
+def _tonal_overlap_gate(prev_f: TrackFeatures, nxt_f: TrackFeatures) -> float:
+    """How much the key matters for this blend (0.75..1.0).
+
+    Key clashes are only audible when tonal material overlaps. Drum-only edges
+    (percussive share ~1) soften a clash a little; real harmonic content on
+    both edges keeps the full key weight. Kept mild: the
+    edge measure is energy-weighted, so a quiet pad under loud hats still reads
+    "drums", and the key also shapes the set's harmonic flow beyond the overlap.
+    """
+
+    # An unmeasured side counts as a typical edge, so it isn't penalised.
+    po = prev_f.outro_percussive if prev_f.outro_percussive is not None else _EDGES_NEUTRAL
+    ni = nxt_f.intro_percussive if nxt_f.intro_percussive is not None else _EDGES_NEUTRAL
+    tonal = math.sqrt(max(0.0, 1.0 - po) * max(0.0, 1.0 - ni))
+    return 0.75 + 0.25 * min(1.0, tonal / _TONAL_FULL)
+
+
+# Tonal overlap (geometric mean of 1 - percussive share) at/above which the key
+# counts fully. Real house/techno edges (>=150 Hz) read median ~0.9 percussive,
+# i.e. tonal ~0.1; clearly melodic edges read tonal 0.5+.
+_TONAL_FULL = 0.25
 
 
 def _vocal_clash_penalty(prev_f: TrackFeatures, nxt_f: TrackFeatures) -> tuple[float, str]:
@@ -274,11 +291,12 @@ def score_transition(
     Final score (all components in 0..1):
 
         score = bpm        * 0.25
-              + key        * 0.25
+              + key        * 0.25   (gated by the edges' tonal overlap)
               + energy     * 0.20
-              + mood       * 0.15
-              + intro_outro* 0.10
+              + mood       * 0.20   (timbre similarity when measured)
+              + intro_outro* 0.10   (drum-led overlapping edges)
               - vocal_pen  * 0.05
+              - 0.30 * max(0, 0.45 - min(bpm, key))   (one clash dominates)
 
     ``entering_segment_role`` is the TrackRole/segment role the incoming track
     is entering (e.g. ``"MAIN_PEAK"``). It only affects the *energy* component:
@@ -291,10 +309,12 @@ def score_transition(
 
         # Harmonic compatibility — single source of truth in utils.camelot.
         # Prefer the precomputed camelot_key, fall back to raw musical_key.
-        key_score = key_compatibility(
+        key_raw = key_compatibility(
             prev.camelot_key or prev.musical_key,
             nxt.camelot_key or nxt.musical_key,
         )
+        # A clash only hurts as much as the edges' tonal content lets it.
+        key_score = 1.0 - _tonal_overlap_gate(prev_f, nxt_f) * (1.0 - key_raw)
 
         energy_score, energy_note = _energy_delta_score(
             prev_f, nxt_f, entering_segment_role
@@ -311,13 +331,14 @@ def score_transition(
             + mood_score * _W_MOOD
             + intro_outro_score * _W_INTRO_OUTRO
             - vocal_penalty * _W_VOCAL
+            # Soft minimum: a tempo or key clash dominates the whole blend.
+            - _CLASH_WEIGHT * max(0.0, _CLASH_FLOOR - min(bpm_score, key_score))
         )
         final = max(0.0, min(1.0, raw))
 
         # Human-readable note summarising the dominant factors.
-        parts = [f"BPM {bpm_note}", f"key {key_score:.2f}", energy_note]
-        if vocal_note:
-            parts.append(vocal_note)
+        parts = [f"BPM {bpm_note}", f"key {key_raw:.2f}", energy_note]
+        parts += [n for n in (mood_note, io_note, vocal_note) if n]
         notes = "; ".join(parts)
 
         return TransitionScore(

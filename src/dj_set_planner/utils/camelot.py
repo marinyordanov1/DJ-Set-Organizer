@@ -261,25 +261,48 @@ def camelot_distance(a: str | None, b: str | None) -> int | None:
     return number_steps + ring_penalty
 
 
-def key_compatibility(a: str | None, b: str | None) -> float:
-    """Return a 0..1 harmonic-compatibility score between two keys.
+# Directed move scores, keyed by d = (to - from) on the wheel folded to -5..+6.
+# Each number step is a perfect fifth (+7 semitones), so d=+2 is a whole tone up
+# (Mixed In Key "energy boost") and d=-5 (= +7) is a semitone up. Values follow
+# shared pitch classes + tonic-triad overlap (Krumhansl key distance).
+_SAME_RING = {
+    0: 1.00,
+    1: 0.90, -1: 0.90,   # perfect-fifth neighbours, the core DJ move
+    2: 0.50,             # energy boost (whole tone up)
+    -2: 0.40,            # energy drop
+    3: 0.30, -3: 0.30,
+    4: 0.25, -4: 0.25,
+    -5: 0.25,            # semitone up: a deliberate lift, clashes in long blends
+    5: 0.15,             # semitone down
+    6: 0.05,             # tritone
+}
+# Minor (A) -> major (B). B -> A uses the same table with d negated.
+_A_TO_B = {
+    0: 0.90,             # relative major: identical notes
+    -1: 0.75,            # accepted diagonal (8A -> 7B, shares 2/3 of the triad)
+    3: 0.60,             # parallel major (8A -> 11B, same root)
+    1: 0.50,             # wrong-way diagonal (8A -> 9B, triads share no note)
+    4: 0.30,
+    2: 0.35,
+    -2: 0.30,            # 5/7 shared notes, like the same-ring +/-2
+    -3: 0.15, -4: 0.15,
+    5: 0.10, -5: 0.10,
+    6: 0.05,
+}
 
-    Scoring (tuned for smooth, energy-preserving day-party transitions):
-      * same key                              -> 1.00
-      * relative major/minor (same number)    -> 0.85
-      * perfect-fifth neighbour (+/-1, ring)  -> 0.85
-      * two number steps away                 -> 0.50
-      * either key unknown                    -> 0.60 (neutral, don't punish)
-      * everything else (clashing)            -> 0.20
+
+def key_compatibility(a: str | None, b: str | None) -> float:
+    """Return a 0..1 harmonic-compatibility score for mixing ``a`` into ``b``.
+
+    Directional (8A -> 7B is an accepted diagonal, 8A -> 9B is not). Highlights:
+    same 1.0, +/-1 and relative 0.90, good diagonal 0.75, parallel 0.60, energy
+    boost 0.50, real clashes <= 0.20. Either key unknown -> 0.60 (neutral).
     """
 
     ca = to_camelot(a)
     cb = to_camelot(b)
     if ca is None or cb is None:
         return 0.6  # neutral: missing key data should not dominate scoring
-
-    if ca == cb:
-        return 1.0
 
     pa = _split_camelot(ca)
     pb = _split_camelot(cb)
@@ -288,21 +311,12 @@ def key_compatibility(a: str | None, b: str | None) -> float:
 
     num_a, ring_a = pa
     num_b, ring_b = pb
+    d = (num_b - num_a) % 12
+    if d > 6:
+        d -= 12
 
-    raw = abs(num_a - num_b)
-    number_steps = min(raw, 12 - raw)
-
-    # Relative major/minor: same number, different ring.
-    if number_steps == 0 and ring_a != ring_b:
-        return 0.85
-
-    # Perfect-fifth neighbours: one number step, same ring.
-    if number_steps == 1 and ring_a == ring_b:
-        return 0.85
-
-    # Two steps on the same ring is a passable, more noticeable move.
-    if number_steps == 2 and ring_a == ring_b:
-        return 0.5
-
-    # One step but ring also flips, or anything further: clashing.
-    return 0.2
+    if ring_a == ring_b:
+        return _SAME_RING[d]
+    if ring_a == "B" and d != 6:
+        d = -d  # B -> A mirrors A -> B
+    return _A_TO_B[d]

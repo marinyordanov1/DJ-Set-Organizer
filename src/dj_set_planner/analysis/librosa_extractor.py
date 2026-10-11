@@ -19,6 +19,9 @@ Each mapping formula is commented with what raw feature it uses and why.
 
 from __future__ import annotations
 
+import os
+from dataclasses import replace
+
 from ..domain.models import Track, TrackFeatures
 from ..utils.camelot import to_camelot
 from ..utils.logging import get_logger
@@ -113,7 +116,11 @@ class LibrosaFeatureExtractor(FeatureExtractor):
                 track.file_path,
                 exc_info=True,
             )
-            return score_from_metadata(track)
+            # timbre=() marks "analysed by this version, nothing measurable", so
+            # the app doesn't keep asking to re-analyse an undecodable file. A
+            # MISSING file (unmounted drive) stays None: re-analyse it later.
+            fallback = score_from_metadata(track)
+            return replace(fallback, timbre=()) if os.path.isfile(track.file_path) else fallback
 
     # ------------------------------------------------------------------
     # Internal: the actual librosa work. Raises on any problem; the public
@@ -123,29 +130,32 @@ class LibrosaFeatureExtractor(FeatureExtractor):
         import librosa
         import numpy as np
 
-        # Load a representative mono window. ``res_type='kaiser_fast'`` keeps
-        # this quick; librosa raises if the file is missing/undecodable, which
-        # propagates up to the fallback in ``extract``.
-        y, sr = librosa.load(
-            track.file_path,
-            sr=None,
-            mono=True,
-            offset=_ANALYSIS_OFFSET_SECONDS,
-            duration=_ANALYSIS_DURATION_SECONDS,
-            res_type="kaiser_fast",
-        )
-
-        # If the offset landed past the end (short track), retry from the top.
-        if y is None or len(y) == 0:
+        # Decode ONCE and slice: the body window (skip a sparse first 30 s, use
+        # 90 s) plus the first/last ~30 s the DJ actually overlaps. Very long
+        # files (full mixes) only get the body window — no whole-hour decode.
+        # librosa raises if the file is missing/undecodable -> fallback.
+        total = track.duration_seconds or librosa.get_duration(path=track.file_path)
+        intro_perc = outro_perc = None
+        if total <= _FULL_LOAD_MAX_SECONDS:
+            y_full, sr = librosa.load(track.file_path, sr=None, mono=True)
+            o = int(_ANALYSIS_OFFSET_SECONDS * sr)
+            d = int(_ANALYSIS_DURATION_SECONDS * sr)
+            y = y_full[o:o + d]
+            if len(y) == 0:  # short track: analyse from the top
+                y = y_full[:d]
+            intro_perc, outro_perc = _edge_percussive(y_full, sr)
+        else:
             y, sr = librosa.load(
                 track.file_path,
                 sr=None,
                 mono=True,
+                offset=_ANALYSIS_OFFSET_SECONDS,
                 duration=_ANALYSIS_DURATION_SECONDS,
-                res_type="kaiser_fast",
             )
         if y is None or len(y) == 0:
             raise ValueError("empty audio signal")
+
+        timbre = _timbre(y, sr)  # sound palette (() on failure, never fatal)
 
         # -- Raw features ------------------------------------------------
         # Tempo (BPM): prefer the tag BPM if present (more reliable than
@@ -192,9 +202,8 @@ class LibrosaFeatureExtractor(FeatureExtractor):
         # the ALREADY-loaded signal (no second file load); ratio =
         # harmonic_rms / (harmonic_rms + percussive_rms), so 1.0 = fully melodic.
         try:
-            y_harm, y_perc = librosa.effects.hpss(y)
-            h_rms = float(np.sqrt(np.mean(y_harm ** 2)))
-            p_rms = float(np.sqrt(np.mean(y_perc ** 2)))
+            h_e, p_e = _hpss_energies(y)
+            h_rms, p_rms = float(np.sqrt(h_e)), float(np.sqrt(p_e))
             harmonic_ratio = _clamp01(h_rms / (h_rms + p_rms)) if (h_rms + p_rms) > 0 else 0.5
         except Exception:
             # Don't lose the other features if HPSS chokes on a clip.
@@ -272,4 +281,84 @@ class LibrosaFeatureExtractor(FeatureExtractor):
             restaurant_safety_score=restaurant_safety,
             mixability_score=mixability,
             harmonic_ratio=harmonic_ratio,
+            intro_percussive=intro_perc,
+            outro_percussive=outro_perc,
+            timbre=timbre,
         )
+
+
+_EDGE_SECONDS = 30.0
+# Above this a file is a full mix, not a track: body window only.
+_FULL_LOAD_MAX_SECONDS = 20 * 60
+
+
+def _edge_percussive(y_full, sr) -> tuple[float | None, float | None]:
+    """Percussive share of the first and last ~30 s (the parts a DJ overlaps).
+
+    The outro window stops 2 s before the end to skip the fade/silence tail.
+    """
+
+    try:
+        n = int(_EDGE_SECONDS * sr)
+        tail = int(2 * sr)
+        if len(y_full) < 2 * n + tail:
+            return None, None
+        return (
+            _percussive_share(y_full[:n], sr),
+            _percussive_share(y_full[len(y_full) - n - tail:len(y_full) - tail], sr),
+        )
+    except Exception:
+        _log.debug("edge analysis failed", exc_info=True)
+        return None, None
+
+
+def _hpss_energies(y, sr=None, fmin: float = 0.0) -> tuple[float, float]:
+    """(harmonic, percussive) energy of a window via HPSS on the magnitude
+    spectrogram, over bins >= ``fmin`` Hz. hop 1024 + kernel 17 is ~5x faster
+    than ``effects.hpss`` (no inverse STFT) and plenty to tell drums from pads."""
+
+    import librosa
+    import numpy as np
+
+    S = np.abs(librosa.stft(y, n_fft=2048, hop_length=1024))
+    H, P = librosa.decompose.hpss(S, kernel_size=17)
+    if fmin > 0:
+        keep = librosa.fft_frequencies(sr=sr, n_fft=2048) >= fmin
+        H, P = H[keep], P[keep]
+    return float(np.sum(H ** 2)), float(np.sum(P ** 2))
+
+
+# A sustained kick fundamental (~50-100 Hz) reads as "harmonic" to HPSS, and the
+# bass is EQ-swapped in a blend anyway: judge edges on what clashes audibly.
+_EDGE_FMIN_HZ = 150.0
+
+
+def _percussive_share(y, sr) -> float | None:
+    """Percussive / (harmonic + percussive) energy of an edge window, or None."""
+
+    if y is None or len(y) == 0:
+        return None
+    h, p = _hpss_energies(y, sr, _EDGE_FMIN_HZ)
+    return round(p / (h + p), 4) if (h + p) > 0 else None
+
+
+def _timbre(y, sr) -> tuple[float, ...]:
+    """Sound-palette vector: mean MFCC 1-12 (c0 = loudness dropped) + spectral
+    contrast, computed at a fixed 22.05 kHz so the file's sample rate / format
+    doesn't masquerade as a different sound. () when it can't be measured."""
+
+    try:
+        import librosa
+        import numpy as np
+
+        if sr != _TIMBRE_SR:
+            y = librosa.resample(y, orig_sr=sr, target_sr=_TIMBRE_SR)
+        mfcc = librosa.feature.mfcc(y=y, sr=_TIMBRE_SR, n_mfcc=13)[1:].mean(axis=1)
+        contrast = librosa.feature.spectral_contrast(y=y, sr=_TIMBRE_SR).mean(axis=1)
+        return tuple(round(float(v), 4) for v in np.concatenate([mfcc, contrast]))
+    except Exception:
+        _log.debug("timbre extraction failed", exc_info=True)
+        return ()
+
+
+_TIMBRE_SR = 22050
