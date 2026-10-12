@@ -137,3 +137,19 @@ def test_malformed_xml_is_tolerated(tmp_path):
     bad = _write_xml(tmp_path, "<DJ_PLAYLISTS><COLLECTION><TRACK ")  # truncated
     assert parse_rekordbox_xml(bad) == []
     assert apply_rekordbox_to_tracks([Track(id=1, file_path="/x.mp3")], bad) == 0
+
+
+def test_matches_macos_decomposed_umlaut_and_reports_unmatched(tmp_path):
+    # Rekordbox writes "ä" composed (%C3%A4); macOS file names store it
+    # decomposed (a + U+0308). The same file must still match.
+    xml = _SAMPLE_XML.replace(
+        "Sunset%20Groove.mp3", "Chl%C3%A4r%20-%20The%20Silent%20Majority.m4a"
+    )
+    xml_path = _write_xml(tmp_path, xml)
+    nfd = Track(id=1, file_path="/Users/dj/Music/Chlär - The Silent Majority.m4a")
+    other = Track(id=2, file_path="/elsewhere/not_in_xml.mp3")
+    missing: list[Track] = []
+
+    assert apply_rekordbox_to_tracks([nfd, other], xml_path, missing) == 1
+    assert nfd.camelot_key == "8A" and nfd.bpm == 120.0
+    assert missing == [other]

@@ -35,6 +35,7 @@ empty list / a count of ``0`` rather than raising.
 from __future__ import annotations
 
 import os
+import unicodedata
 from urllib.parse import unquote, urlparse
 from xml.etree import ElementTree as ET
 
@@ -208,7 +209,17 @@ def parse_rekordbox_xml(xml_path: str) -> list[dict]:
     return rows
 
 
-def apply_rekordbox_to_tracks(tracks: list[Track], xml_path: str) -> int:
+def _match_key(path: str) -> str:
+    """Case- and Unicode-insensitive match key. macOS stores "ä" decomposed
+    (a + combining umlaut, NFD) while Rekordbox writes it composed (NFC), so
+    the same file must still match."""
+
+    return unicodedata.normalize("NFC", path).casefold()
+
+
+def apply_rekordbox_to_tracks(
+    tracks: list[Track], xml_path: str, unmatched: list[Track] | None = None
+) -> int:
     """Fill missing analysis fields on ``tracks`` from a Rekordbox XML.
 
     Matching strategy (case-insensitive):
@@ -222,12 +233,15 @@ def apply_rekordbox_to_tracks(tracks: list[Track], xml_path: str) -> int:
     explicit import). ``duration_seconds`` is only filled when missing (the file's
     own duration is already exact).
 
-    Returns the number of Tracks that matched a Rekordbox row. Tolerates a
-    missing/garbage XML by returning ``0``.
+    Returns the number of Tracks that matched a Rekordbox row; tracks with no
+    row are appended to ``unmatched`` when given. Tolerates a missing/garbage
+    XML by returning ``0``.
     """
 
     rows = parse_rekordbox_xml(xml_path)
     if not rows:
+        if unmatched is not None:
+            unmatched.extend(t for t in tracks if t.file_path)
         return 0
 
     # Build lookup tables from the parsed rows. Full-path keys take precedence
@@ -238,8 +252,8 @@ def apply_rekordbox_to_tracks(tracks: list[Track], xml_path: str) -> int:
         rp = row["file_path"]
         if not rp:
             continue
-        by_path[rp.lower()] = row
-        base = os.path.basename(rp).lower()
+        by_path[_match_key(rp)] = row
+        base = _match_key(os.path.basename(rp))
         if base:
             # First write wins for a basename collision; this is deterministic
             # given the input ordering and avoids surprising overwrites.
@@ -250,11 +264,12 @@ def apply_rekordbox_to_tracks(tracks: list[Track], xml_path: str) -> int:
         if not track.file_path:
             continue
 
-        row = by_path.get(track.file_path.lower())
+        row = by_path.get(_match_key(track.file_path))
         if row is None:
-            base = os.path.basename(track.file_path).lower()
-            row = by_basename.get(base)
+            row = by_basename.get(_match_key(os.path.basename(track.file_path)))
         if row is None:
+            if unmatched is not None:
+                unmatched.append(track)
             continue
 
         matched += 1

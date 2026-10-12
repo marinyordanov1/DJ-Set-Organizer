@@ -126,6 +126,14 @@ class PlannerService:
         saved: list[Track] = []
         for path in paths:
             track = read_metadata(path)  # never raises; best-effort fields
+            old = self.tracks.get_by_path(path)
+            if old is not None:
+                # A re-scan must not wipe what Rekordbox / analysis supplied:
+                # stored BPM/key win, tags only fill gaps.
+                if old.camelot_key:
+                    track.musical_key, track.camelot_key = old.musical_key, old.camelot_key
+                track.bpm = old.bpm or track.bpm
+                track.analyzed_at = old.analyzed_at
             saved.append(self.tracks.upsert(track))
         # Sync the library to this folder: drop tracks no longer present, so
         # switching folders REPLACES rather than accumulates. Re-scanning the
@@ -186,23 +194,25 @@ class PlannerService:
         return result, used_librosa
 
     # ----- rekordbox ------------------------------------------------------ #
-    def rekordbox_import(self, xml_path: str) -> int:
+    def rekordbox_import(self, xml_path: str) -> tuple[int, int, list[str]]:
         """Apply a Rekordbox XML to the stored library; persist any fills.
 
-        Returns the number of tracks matched. Tolerant of a bad path/XML (the
-        underlying function logs and returns 0).
+        Returns ``(matched, total, unmatched_titles)`` so the DJ sees which
+        tracks still carry an estimated key (not in that XML). Tolerant of a
+        bad XML (the underlying function logs and returns 0).
         """
 
         if not xml_path or not os.path.isfile(xml_path):
             raise ApiError(f"Rekordbox XML not found: {xml_path!r}", status=400)
 
         library = self.tracks.get_all()
-        matched = apply_rekordbox_to_tracks(library, xml_path)
+        missing: list[Track] = []
+        matched = apply_rekordbox_to_tracks(library, xml_path, missing)
         # Persist whatever was filled in (bpm/key/camelot/duration).
         for track in library:
             self.tracks.upsert(track)
         _log.info("rekordbox_import: matched %d track(s) from %s", matched, xml_path)
-        return matched
+        return matched, len(library), [t.title or os.path.basename(t.file_path) for t in missing]
 
     # ----- features (analyzed + manual overrides) ------------------------ #
     def _overlaid_features(self) -> dict[int, TrackFeatures]:
@@ -620,8 +630,8 @@ def create_app() -> Flask:
     def api_rekordbox_import():
         body = request.get_json(silent=True) or {}
         xml_path = (body.get("xml_path") or "").strip()
-        matched = service.rekordbox_import(xml_path)
-        return jsonify({"matched": matched})
+        matched, total, unmatched = service.rekordbox_import(xml_path)
+        return jsonify({"matched": matched, "total": total, "unmatched": unmatched})
 
     @app.get("/api/tracks")
     def api_tracks():

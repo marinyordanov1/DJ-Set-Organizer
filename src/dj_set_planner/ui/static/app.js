@@ -531,7 +531,10 @@ async function doImport() {
   busy(true, "Importing Rekordbox XML…");
   try {
     const data = await api("/api/rekordbox-import", { method: "POST", body: { xml_path: xmlPath.trim() } });
-    log(`Rekordbox: matched ${data.matched} track(s).`, "ok");
+    log(`Rekordbox: matched ${data.matched} of ${data.total} track(s).`, "ok");
+    if (data.unmatched && data.unmatched.length) {
+      log(`Not in this XML — BPM/key are estimates: ${data.unmatched.join(", ")}. Add them to Rekordbox, analyze, and export the XML again.`, "error");
+    }
     await loadLibrary();
   } catch (err) {
     log(`Rekordbox import failed: ${err.message}`, "error");
